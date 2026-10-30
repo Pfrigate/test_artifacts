@@ -27,6 +27,10 @@ PyWinRT se usa donde funciona bien: `GraphicsCaptureSession.is_supported()` y
 * La disponibilidad de 4K60 por hardware depende de la GPU/driver; la detección (`MFTEnumEx` + `SetOutputType/SetInputType`) es orientativa: algunos MFT aceptan el tipo y fallan después. Si `BeginWriting` falla, se cae automáticamente a Main y luego al codificador software de Microsoft.
 * El codificador software a 4K60 no alcanza tiempo real en CPUs modestas; el pipeline descarta ranuras (timestamps correctos, vídeo con saltos).
 * Sin audio por diseño.
+* `moov` se escribe al final (sin *fast start*). Con `MF_MPEG4SINK_MOOV_BEFORE_MDAT` el sink de
+  Media Foundation reubicaba `moov` en `Finalize`, pero los offsets de las muestras quedaban
+  apuntando a bytes incorrectos y el decodificador H.264 descartaba todo; se desactivó y ahora cada
+  prueba decodifica un fotograma para detectarlo. No afecta a PowerPoint con archivos locales.
 * Ediciones Windows "N" requieren el *Media Feature Pack*; Windows Server requiere la característica *Server-Media-Foundation*.
 
 ## Pruebas en CI

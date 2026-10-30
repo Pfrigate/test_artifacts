@@ -45,7 +45,7 @@ $env:QT_QPA_PLATFORM="offscreen"; python -m pytest -v -rs
 ```
 
 * `tests/unit`: lógica pura (geometría, timestamps, máquina de estados, parser MP4, ajustes, UI offscreen); también en Linux.
-* `tests/windows`: extensión nativa — los 9 modos (720p/1080p/4K × 15/30/60), ambos convertidores, codificador software, subida desde CPU con stride, huecos de timeline, pausa/reanudación, self-test completo, miniaturas y captura real WGC/DXcam. Cada MP4 se valida con el Source Reader de Media Foundation y `core/mp4info.py` (H.264, perfil/nivel, sin audio, `moov` antes de `mdat`, nº de frames, timestamps únicos).
+* `tests/windows`: extensión nativa — los 9 modos (720p/1080p/4K × 15/30/60), ambos convertidores, codificador software, subida desde CPU con stride, huecos de timeline, pausa/reanudación, self-test completo, miniaturas y captura real WGC/DXcam. Cada MP4 se valida con el Source Reader de Media Foundation y `core/mp4info.py` (H.264, perfil/nivel, sin audio, nº de frames, timestamps únicos) y se decodifica un fotograma.
 
 ## Benchmark de CPU y GPU
 

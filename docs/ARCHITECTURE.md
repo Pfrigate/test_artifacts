@@ -81,5 +81,8 @@ está protegido (`ID3D11Multithread`) y las secuencias de llamadas se serializan
 ## Compatibilidad PowerPoint
 
 H.264 High (o Main) progresivo, 4:2:0 NV12, PAR 1:1, BT.709 rango limitado, nivel ≤ 5.2,
-dimensiones pares, sin pista de audio, `moov` antes de `mdat` (`MF_MPEG4SINK_MOOV_BEFORE_MDAT`).
-`core/mp4info.py` verifica todo esto en las pruebas y en `--selftest`.
+dimensiones pares, sin pista de audio. Las pruebas y `--selftest` verifican todo esto con
+`core/mp4info.py` y el Source Reader de Media Foundation, y además **decodifican un fotograma de
+cada archivo**. `moov` queda al final del archivo (ver LIMITATIONS: la reubicación
+`MF_MPEG4SINK_MOOV_BEFORE_MDAT` generaba archivos no decodificables); PowerPoint reproduce
+archivos locales así sin problema.
