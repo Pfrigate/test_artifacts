@@ -37,9 +37,14 @@ jobs:
       - name: Ensure Media Foundation is present
         shell: pwsh
         run: |
-          if (-not (Test-Path "$env:WINDIR\System32\mfplat.dll")) {
-            Write-Host "mfplat.dll missing, installing Server-Media-Foundation"
-            Install-WindowsFeature Server-Media-Foundation
+          # Windows Server ships the MF binaries but decoding requires the
+          # Server-Media-Foundation feature to be enabled.
+          $os = (Get-CimInstance Win32_OperatingSystem).Caption
+          Write-Host "OS: $os"
+          if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
+            Get-WindowsFeature Server-Media-Foundation | Format-Table Name, InstallState
+            $r = Install-WindowsFeature Server-Media-Foundation
+            $r | Format-Table Success, RestartNeeded, ExitCode
           }
           Get-Item "$env:WINDIR\System32\mfplat.dll", "$env:WINDIR\System32\mfreadwrite.dll", "$env:WINDIR\System32\msmpeg2vdec.dll" | Format-Table Name, Length
 
