@@ -177,23 +177,25 @@ ProbeResult probe_file(const std::wstring& path, bool count_frames) {
 
 std::tuple<std::string, UINT, UINT> decode_thumbnail(const std::wstring& path, int64_t position_hns) {
   ensure_mf();
-  com_ptr<IMFAttributes> attrs;
-  check(MFCreateAttributes(attrs.put(), 1), "MFCreateAttributes");
-  attrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
   com_ptr<IMFSourceReader> reader;
-  check(MFCreateSourceReaderFromURL(path.c_str(), attrs.get(), reader.put()), "MFCreateSourceReaderFromURL");
+  check(MFCreateSourceReaderFromURL(path.c_str(), nullptr, reader.put()), "MFCreateSourceReaderFromURL");
   const DWORD video = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+  reader->SetStreamSelection(static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS), FALSE);
+  check(reader->SetStreamSelection(video, TRUE), "SetStreamSelection(video)");
 
-  com_ptr<IMFMediaType> rgb;
-  check(MFCreateMediaType(rgb.put()), "MFCreateMediaType");
-  rgb->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-  rgb->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-  check(reader->SetCurrentMediaType(video, nullptr, rgb.get()), "SetCurrentMediaType(RGB32)");
+  // NV12 is the H.264 decoder's native output, so no extra colour-converter MFT is needed;
+  // the small thumbnail is converted to BGRA on the CPU below.
+  com_ptr<IMFMediaType> nv12;
+  check(MFCreateMediaType(nv12.put()), "MFCreateMediaType");
+  nv12->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+  nv12->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+  check(reader->SetCurrentMediaType(video, nullptr, nv12.get()), "SetCurrentMediaType(NV12)");
 
   com_ptr<IMFMediaType> current;
   check(reader->GetCurrentMediaType(video, current.put()), "GetCurrentMediaType");
   UINT32 width = 0, height = 0;
   MFGetAttributeSize(current.get(), MF_MT_FRAME_SIZE, &width, &height);
+  if (width == 0 || height == 0) throw HrError(E_UNEXPECTED, "Decoder reported an empty frame size");
 
   if (position_hns > 0) {
     PROPVARIANT var;
@@ -209,12 +211,14 @@ std::tuple<std::string, UINT, UINT> decode_thumbnail(const std::wstring& path, i
   for (; reads < 240 && !sample; ++reads) {
     flags = 0;
     check(reader->ReadSample(video, 0, nullptr, &flags, nullptr, sample.put()), "IMFSourceReader::ReadSample");
+    if ((flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) != 0) {
+      current = nullptr;
+      reader->GetCurrentMediaType(video, current.put());
+      MFGetAttributeSize(current.get(), MF_MT_FRAME_SIZE, &width, &height);
+    }
     if ((flags & (MF_SOURCE_READERF_ENDOFSTREAM | MF_SOURCE_READERF_ERROR)) != 0) break;
   }
-  if (!sample && position_hns > 0) {
-    // Seeking can land past the last decodable frame of very short clips: retry from 0.
-    return decode_thumbnail(path, 0);
-  }
+  if (!sample && position_hns > 0) return decode_thumbnail(path, 0);
   if (!sample) {
     char detail[96];
     std::snprintf(detail, sizeof(detail), "No decodable video frame found (reads=%d, flags=0x%lX)", reads,
@@ -223,32 +227,57 @@ std::tuple<std::string, UINT, UINT> decode_thumbnail(const std::wstring& path, i
   }
 
   com_ptr<IMFMediaBuffer> buffer;
-  check(sample->GetBufferByIndex(0, buffer.put()), "GetBufferByIndex");
+  check(sample->ConvertToContiguousBuffer(buffer.put()), "ConvertToContiguousBuffer");
+  BYTE* data = nullptr;
+  LONG pitch = 0;
+  com_ptr<IMF2DBuffer> buffer2d = buffer.try_as<IMF2DBuffer>();
+  DWORD length = 0;
+  if (buffer2d) {
+    check(buffer2d->Lock2D(&data, &pitch), "IMF2DBuffer::Lock2D");
+  } else {
+    check(buffer->Lock(&data, nullptr, &length), "IMFMediaBuffer::Lock");
+    pitch = static_cast<LONG>(MFGetAttributeUINT32(current.get(), MF_MT_DEFAULT_STRIDE, width));
+  }
+  // NV12: Y plane, then interleaved UV plane. MF_MT_FRAME_SIZE is the coded (possibly
+  // 16-line padded) size that defines the plane layout; the display aperture is the
+  // visible picture.
+  UINT32 coded_width = 0, coded_height = 0;
+  MFGetAttributeSize(current.get(), MF_MT_FRAME_SIZE, &coded_width, &coded_height);
+  width = coded_width;
+  height = coded_height;
+  MFVideoArea area{};
+  if (SUCCEEDED(current->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE, reinterpret_cast<UINT8*>(&area), sizeof(area),
+                                 nullptr)) &&
+      area.Area.cx > 0 && area.Area.cy > 0) {
+    width = std::min<UINT32>(width, static_cast<UINT32>(area.Area.cx));
+    height = std::min<UINT32>(height, static_cast<UINT32>(area.Area.cy));
+  }
+  if (pitch <= 0) pitch = static_cast<LONG>(coded_width);
+  const UINT32 aligned_height = coded_height;
+  const BYTE* y_plane = data;
+  const BYTE* uv_plane = data + static_cast<ptrdiff_t>(pitch) * aligned_height;
   std::string pixels(static_cast<size_t>(width) * height * 4, '\0');
-
-  if (auto buffer2d = buffer.try_as<IMF2DBuffer>()) {
-    BYTE* scan0 = nullptr;
-    LONG pitch = 0;
-    check(buffer2d->Lock2D(&scan0, &pitch), "IMF2DBuffer::Lock2D");
-    for (UINT32 y = 0; y < height; ++y) {
-      std::memcpy(&pixels[static_cast<size_t>(y) * width * 4], scan0 + static_cast<ptrdiff_t>(y) * pitch,
-                  static_cast<size_t>(width) * 4);
+  auto clamp8 = [](int v) { return static_cast<char>(v < 0 ? 0 : (v > 255 ? 255 : v)); };
+  for (UINT32 yy = 0; yy < height; ++yy) {
+    const BYTE* yrow = y_plane + static_cast<ptrdiff_t>(yy) * pitch;
+    const BYTE* uvrow = uv_plane + static_cast<ptrdiff_t>(yy / 2) * pitch;
+    char* out = &pixels[static_cast<size_t>(yy) * width * 4];
+    for (UINT32 xx = 0; xx < width; ++xx) {
+      // BT.709 limited range -> full-range RGB (fixed point, 8-bit fraction).
+      const int c = (static_cast<int>(yrow[xx]) - 16) * 298;
+      const int d = static_cast<int>(uvrow[xx & ~1u]) - 128;
+      const int e = static_cast<int>(uvrow[(xx & ~1u) + 1]) - 128;
+      out[xx * 4 + 0] = clamp8((c + 541 * d + 128) >> 8);            // B
+      out[xx * 4 + 1] = clamp8((c - 55 * d - 136 * e + 128) >> 8);   // G
+      out[xx * 4 + 2] = clamp8((c + 459 * e + 128) >> 8);            // R
+      out[xx * 4 + 3] = static_cast<char>(0xFF);
     }
+  }
+  if (buffer2d) {
     buffer2d->Unlock2D();
   } else {
-    BYTE* data = nullptr;
-    DWORD length = 0;
-    check(buffer->Lock(&data, nullptr, &length), "IMFMediaBuffer::Lock");
-    LONG stride = static_cast<LONG>(MFGetAttributeUINT32(current.get(), MF_MT_DEFAULT_STRIDE, width * 4));
-    for (UINT32 y = 0; y < height; ++y) {
-      const ptrdiff_t row = stride >= 0 ? static_cast<ptrdiff_t>(y) * stride
-                                        : static_cast<ptrdiff_t>(height - 1 - y) * (-stride);
-      if (row + static_cast<ptrdiff_t>(width) * 4 > static_cast<ptrdiff_t>(length)) break;
-      std::memcpy(&pixels[static_cast<size_t>(y) * width * 4], data + row, static_cast<size_t>(width) * 4);
-    }
     buffer->Unlock();
   }
-  for (size_t i = 3; i < pixels.size(); i += 4) pixels[i] = static_cast<char>(0xFF);
   return {std::move(pixels), width, height};
 }
 

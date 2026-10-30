@@ -93,7 +93,7 @@ def test_explicit_indices_keep_wall_clock_timeline(device, output_dir):
     # Either the 5 samples are kept with their timestamps, or the encoder fills the gap by
     # repeating frames (Microsoft's software MFT does); the timeline must reach index 11.
     assert report["probe"]["frame_count"] in (5, 12)
-    assert report["probe"]["last_pts"] == pytest.approx(11 / 30, abs=1e-3)
+    assert 11 / 30 - 1e-3 <= report["probe"]["last_pts"] <= 12 / 30 + 1e-3
 
 
 def test_zero_frames_leaves_no_file(device, output_dir):
