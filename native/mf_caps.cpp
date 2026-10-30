@@ -192,6 +192,170 @@ ProbeResult probe_file(const std::wstring& path, bool count_frames) {
   return r;
 }
 
+namespace {
+
+// Converts a decoded NV12 sample to top-down BGRA (BT.709 limited range -> full RGB).
+std::tuple<std::string, UINT, UINT> nv12_sample_to_bgra(IMFSample* sample, IMFMediaType* type) {
+  // MF_MT_FRAME_SIZE is the coded (possibly 16-line padded) size that defines the plane
+  // layout; the display aperture is the visible picture.
+  UINT32 coded_width = 0, coded_height = 0;
+  MFGetAttributeSize(type, MF_MT_FRAME_SIZE, &coded_width, &coded_height);
+  if (coded_width == 0 || coded_height == 0) throw HrError(E_UNEXPECTED, "Decoder reported an empty frame size");
+  UINT32 width = coded_width, height = coded_height;
+  MFVideoArea area{};
+  if (SUCCEEDED(type->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE, reinterpret_cast<UINT8*>(&area), sizeof(area), nullptr)) &&
+      area.Area.cx > 0 && area.Area.cy > 0) {
+    width = std::min<UINT32>(width, static_cast<UINT32>(area.Area.cx));
+    height = std::min<UINT32>(height, static_cast<UINT32>(area.Area.cy));
+  }
+
+  com_ptr<IMFMediaBuffer> buffer;
+  check(sample->ConvertToContiguousBuffer(buffer.put()), "ConvertToContiguousBuffer");
+  BYTE* data = nullptr;
+  LONG pitch = 0;
+  com_ptr<IMF2DBuffer> buffer2d = buffer.try_as<IMF2DBuffer>();
+  if (buffer2d) {
+    check(buffer2d->Lock2D(&data, &pitch), "IMF2DBuffer::Lock2D");
+  } else {
+    DWORD length = 0;
+    check(buffer->Lock(&data, nullptr, &length), "IMFMediaBuffer::Lock");
+    pitch = static_cast<LONG>(MFGetAttributeUINT32(type, MF_MT_DEFAULT_STRIDE, coded_width));
+  }
+  if (pitch <= 0) pitch = static_cast<LONG>(coded_width);
+
+  const BYTE* y_plane = data;
+  const BYTE* uv_plane = data + static_cast<ptrdiff_t>(pitch) * coded_height;
+  std::string pixels(static_cast<size_t>(width) * height * 4, '\0');
+  auto clamp8 = [](int v) { return static_cast<char>(v < 0 ? 0 : (v > 255 ? 255 : v)); };
+  for (UINT32 yy = 0; yy < height; ++yy) {
+    const BYTE* yrow = y_plane + static_cast<ptrdiff_t>(yy) * pitch;
+    const BYTE* uvrow = uv_plane + static_cast<ptrdiff_t>(yy / 2) * pitch;
+    char* out = &pixels[static_cast<size_t>(yy) * width * 4];
+    for (UINT32 xx = 0; xx < width; ++xx) {
+      const int c = (static_cast<int>(yrow[xx]) - 16) * 298;
+      const int d = static_cast<int>(uvrow[xx & ~1u]) - 128;
+      const int e = static_cast<int>(uvrow[(xx & ~1u) + 1]) - 128;
+      out[xx * 4 + 0] = clamp8((c + 541 * d + 128) >> 8);           // B
+      out[xx * 4 + 1] = clamp8((c - 55 * d - 136 * e + 128) >> 8);  // G
+      out[xx * 4 + 2] = clamp8((c + 459 * e + 128) >> 8);           // R
+      out[xx * 4 + 3] = static_cast<char>(0xFF);
+    }
+  }
+  if (buffer2d) {
+    buffer2d->Unlock2D();
+  } else {
+    buffer->Unlock();
+  }
+  return {std::move(pixels), width, height};
+}
+
+com_ptr<IMFMediaType> find_nv12_output(IMFTransform* decoder) {
+  for (DWORD i = 0;; ++i) {
+    com_ptr<IMFMediaType> type;
+    if (FAILED(decoder->GetOutputAvailableType(0, i, type.put()))) return nullptr;
+    GUID subtype = GUID_NULL;
+    type->GetGUID(MF_MT_SUBTYPE, &subtype);
+    if (subtype == MFVideoFormat_NV12) return type;
+  }
+}
+
+// Drives the H.264 decoder MFT directly with compressed samples from the source reader.
+// Used when the Source Reader's own decode path yields nothing, and reports the exact
+// HRESULT of the failing step otherwise.
+std::tuple<std::string, UINT, UINT> decode_with_mft(const std::wstring& path) {
+  com_ptr<IMFSourceReader> reader;
+  check(MFCreateSourceReaderFromURL(path.c_str(), nullptr, reader.put()), "MFCreateSourceReaderFromURL");
+  const DWORD video = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+  reader->SetStreamSelection(static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS), FALSE);
+  check(reader->SetStreamSelection(video, TRUE), "SetStreamSelection(video)");
+  com_ptr<IMFMediaType> input_type;
+  check(reader->GetNativeMediaType(video, 0, input_type.put()), "GetNativeMediaType");
+
+  MFT_REGISTER_TYPE_INFO input{MFMediaType_Video, MFVideoFormat_H264};
+  IMFActivate** activates = nullptr;
+  UINT32 count = 0;
+  check(MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER, &input, nullptr,
+                  &activates, &count),
+        "MFTEnumEx(decoder)");
+  com_ptr<IMFTransform> decoder;
+  HRESULT hr = count > 0 ? activates[0]->ActivateObject(IID_PPV_ARGS(decoder.put())) : MF_E_TOPO_CODEC_NOT_FOUND;
+  for (UINT32 i = 0; i < count; ++i) activates[i]->Release();
+  CoTaskMemFree(activates);
+  check(hr, "Activate H.264 decoder");
+
+  check(decoder->SetInputType(0, input_type.get(), 0), "Decoder SetInputType");
+  com_ptr<IMFMediaType> output_type = find_nv12_output(decoder.get());
+  if (!output_type) throw HrError(MF_E_INVALIDMEDIATYPE, "Decoder offers no NV12 output");
+  check(decoder->SetOutputType(0, output_type.get(), 0), "Decoder SetOutputType");
+  decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+  decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+  auto try_output = [&](com_ptr<IMFSample>& result) -> HRESULT {
+    for (;;) {
+      MFT_OUTPUT_STREAM_INFO info{};
+      check(decoder->GetOutputStreamInfo(0, &info), "GetOutputStreamInfo");
+      com_ptr<IMFSample> out_sample;
+      if ((info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES)) == 0) {
+        com_ptr<IMFMediaBuffer> out_buffer;
+        check(MFCreateMemoryBuffer(std::max<DWORD>(info.cbSize, 1), out_buffer.put()), "MFCreateMemoryBuffer");
+        check(MFCreateSample(out_sample.put()), "MFCreateSample");
+        out_sample->AddBuffer(out_buffer.get());
+      }
+      MFT_OUTPUT_DATA_BUFFER out{};
+      out.pSample = out_sample.get();
+      DWORD status = 0;
+      HRESULT phr = decoder->ProcessOutput(0, 1, &out, &status);
+      if (out.pEvents) out.pEvents->Release();
+      if (phr == MF_E_TRANSFORM_STREAM_CHANGE) {
+        output_type = find_nv12_output(decoder.get());
+        if (!output_type) return MF_E_INVALIDMEDIATYPE;
+        check(decoder->SetOutputType(0, output_type.get(), 0), "Decoder SetOutputType (stream change)");
+        continue;
+      }
+      if (SUCCEEDED(phr)) {
+        if (out_sample) {
+          result = out_sample;  // we allocated it; out.pSample is a borrowed pointer
+        } else {
+          result.attach(out.pSample);  // the decoder allocated it and handed us its reference
+        }
+      } else if (!out_sample && out.pSample != nullptr) {
+        out.pSample->Release();
+      }
+      return phr;
+    }
+  };
+
+  HRESULT last_input = S_OK;
+  HRESULT last_output = S_OK;
+  int fed = 0;
+  for (int i = 0; i < 600; ++i) {
+    DWORD flags = 0;
+    com_ptr<IMFSample> compressed;
+    check(reader->ReadSample(video, 0, nullptr, &flags, nullptr, compressed.put()), "ReadSample(compressed)");
+    if (compressed) {
+      last_input = decoder->ProcessInput(0, compressed.get(), 0);
+      ++fed;
+      com_ptr<IMFSample> decoded;
+      last_output = try_output(decoded);
+      if (decoded) return nv12_sample_to_bgra(decoded.get(), output_type.get());
+      if (FAILED(last_input) && last_input != MF_E_NOTACCEPTING) break;
+    }
+    if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) break;
+  }
+  decoder->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+  com_ptr<IMFSample> decoded;
+  last_output = try_output(decoded);
+  if (decoded) return nv12_sample_to_bgra(decoded.get(), output_type.get());
+
+  char detail[192];
+  std::snprintf(detail, sizeof(detail),
+                "H.264 decoder produced no frame (fed=%d, ProcessInput=0x%08lX, ProcessOutput=0x%08lX)", fed,
+                static_cast<unsigned long>(last_input), static_cast<unsigned long>(last_output));
+  throw HrError(FAILED(last_input) ? last_input : (FAILED(last_output) ? last_output : MF_E_END_OF_STREAM), detail);
+}
+
+}  // namespace
+
 std::tuple<std::string, UINT, UINT> decode_thumbnail(const std::wstring& path, int64_t position_hns) {
   ensure_mf();
   com_ptr<IMFSourceReader> reader;
@@ -200,19 +364,13 @@ std::tuple<std::string, UINT, UINT> decode_thumbnail(const std::wstring& path, i
   reader->SetStreamSelection(static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS), FALSE);
   check(reader->SetStreamSelection(video, TRUE), "SetStreamSelection(video)");
 
-  // NV12 is the H.264 decoder's native output, so no extra colour-converter MFT is needed;
-  // the small thumbnail is converted to BGRA on the CPU below.
+  // NV12 is the H.264 decoder's native output, so no colour-converter MFT is inserted;
+  // the small thumbnail is converted to BGRA on the CPU.
   com_ptr<IMFMediaType> nv12;
   check(MFCreateMediaType(nv12.put()), "MFCreateMediaType");
   nv12->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
   nv12->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
   check(reader->SetCurrentMediaType(video, nullptr, nv12.get()), "SetCurrentMediaType(NV12)");
-
-  com_ptr<IMFMediaType> current;
-  check(reader->GetCurrentMediaType(video, current.put()), "GetCurrentMediaType");
-  UINT32 width = 0, height = 0;
-  MFGetAttributeSize(current.get(), MF_MT_FRAME_SIZE, &width, &height);
-  if (width == 0 || height == 0) throw HrError(E_UNEXPECTED, "Decoder reported an empty frame size");
 
   if (position_hns > 0) {
     PROPVARIANT var;
@@ -223,79 +381,18 @@ std::tuple<std::string, UINT, UINT> decode_thumbnail(const std::wstring& path, i
   }
 
   com_ptr<IMFSample> sample;
-  DWORD flags = 0;
-  int reads = 0;
-  for (; reads < 240 && !sample; ++reads) {
-    flags = 0;
+  for (int reads = 0; reads < 240 && !sample; ++reads) {
+    DWORD flags = 0;
     check(reader->ReadSample(video, 0, nullptr, &flags, nullptr, sample.put()), "IMFSourceReader::ReadSample");
-    if ((flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) != 0) {
-      current = nullptr;
-      reader->GetCurrentMediaType(video, current.put());
-      MFGetAttributeSize(current.get(), MF_MT_FRAME_SIZE, &width, &height);
-    }
     if ((flags & (MF_SOURCE_READERF_ENDOFSTREAM | MF_SOURCE_READERF_ERROR)) != 0) break;
   }
-  if (!sample && position_hns > 0) return decode_thumbnail(path, 0);
-  if (!sample) {
-    char detail[96];
-    std::snprintf(detail, sizeof(detail), "No decodable video frame found (reads=%d, flags=0x%lX)", reads,
-                  static_cast<unsigned long>(flags));
-    throw HrError(MF_E_END_OF_STREAM, detail);
+  if (sample) {
+    com_ptr<IMFMediaType> current;
+    check(reader->GetCurrentMediaType(video, current.put()), "GetCurrentMediaType");
+    return nv12_sample_to_bgra(sample.get(), current.get());
   }
-
-  com_ptr<IMFMediaBuffer> buffer;
-  check(sample->ConvertToContiguousBuffer(buffer.put()), "ConvertToContiguousBuffer");
-  BYTE* data = nullptr;
-  LONG pitch = 0;
-  com_ptr<IMF2DBuffer> buffer2d = buffer.try_as<IMF2DBuffer>();
-  DWORD length = 0;
-  if (buffer2d) {
-    check(buffer2d->Lock2D(&data, &pitch), "IMF2DBuffer::Lock2D");
-  } else {
-    check(buffer->Lock(&data, nullptr, &length), "IMFMediaBuffer::Lock");
-    pitch = static_cast<LONG>(MFGetAttributeUINT32(current.get(), MF_MT_DEFAULT_STRIDE, width));
-  }
-  // NV12: Y plane, then interleaved UV plane. MF_MT_FRAME_SIZE is the coded (possibly
-  // 16-line padded) size that defines the plane layout; the display aperture is the
-  // visible picture.
-  UINT32 coded_width = 0, coded_height = 0;
-  MFGetAttributeSize(current.get(), MF_MT_FRAME_SIZE, &coded_width, &coded_height);
-  width = coded_width;
-  height = coded_height;
-  MFVideoArea area{};
-  if (SUCCEEDED(current->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE, reinterpret_cast<UINT8*>(&area), sizeof(area),
-                                 nullptr)) &&
-      area.Area.cx > 0 && area.Area.cy > 0) {
-    width = std::min<UINT32>(width, static_cast<UINT32>(area.Area.cx));
-    height = std::min<UINT32>(height, static_cast<UINT32>(area.Area.cy));
-  }
-  if (pitch <= 0) pitch = static_cast<LONG>(coded_width);
-  const UINT32 aligned_height = coded_height;
-  const BYTE* y_plane = data;
-  const BYTE* uv_plane = data + static_cast<ptrdiff_t>(pitch) * aligned_height;
-  std::string pixels(static_cast<size_t>(width) * height * 4, '\0');
-  auto clamp8 = [](int v) { return static_cast<char>(v < 0 ? 0 : (v > 255 ? 255 : v)); };
-  for (UINT32 yy = 0; yy < height; ++yy) {
-    const BYTE* yrow = y_plane + static_cast<ptrdiff_t>(yy) * pitch;
-    const BYTE* uvrow = uv_plane + static_cast<ptrdiff_t>(yy / 2) * pitch;
-    char* out = &pixels[static_cast<size_t>(yy) * width * 4];
-    for (UINT32 xx = 0; xx < width; ++xx) {
-      // BT.709 limited range -> full-range RGB (fixed point, 8-bit fraction).
-      const int c = (static_cast<int>(yrow[xx]) - 16) * 298;
-      const int d = static_cast<int>(uvrow[xx & ~1u]) - 128;
-      const int e = static_cast<int>(uvrow[(xx & ~1u) + 1]) - 128;
-      out[xx * 4 + 0] = clamp8((c + 541 * d + 128) >> 8);            // B
-      out[xx * 4 + 1] = clamp8((c - 55 * d - 136 * e + 128) >> 8);   // G
-      out[xx * 4 + 2] = clamp8((c + 459 * e + 128) >> 8);            // R
-      out[xx * 4 + 3] = static_cast<char>(0xFF);
-    }
-  }
-  if (buffer2d) {
-    buffer2d->Unlock2D();
-  } else {
-    buffer->Unlock();
-  }
-  return {std::move(pixels), width, height};
+  reader = nullptr;
+  return decode_with_mft(path);
 }
 
 }  // namespace sr
