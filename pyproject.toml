@@ -17,7 +17,7 @@ classifiers = [
 dependencies = [
   "PySide6-Essentials>=6.7",
   "numpy>=1.26",
-  "dxcam>=0.0.5; sys_platform == 'win32'",
+  "dxcam>=0.3.0; sys_platform == 'win32'",
   "winrt-runtime>=2.2; sys_platform == 'win32'",
   "winrt-Windows.Foundation>=2.2; sys_platform == 'win32'",
   "winrt-Windows.Foundation.Metadata>=2.2; sys_platform == 'win32'",

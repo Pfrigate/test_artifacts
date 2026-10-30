@@ -132,8 +132,15 @@ class DxcamSession:
 
     def start(self) -> None:
         try:
+            # backend="dxgi": Desktop Duplication. processor_backend="numpy": dxcam's default
+            # processor is OpenCV, which this project must not depend on.
             self._camera = self._dxcam.create(
-                device_idx=self._device_idx, output_idx=self._output_idx, output_color="BGRA", max_buffer_len=8
+                device_idx=self._device_idx,
+                output_idx=self._output_idx,
+                output_color="BGRA",
+                max_buffer_len=8,
+                backend="dxgi",
+                processor_backend="numpy",
             )
             if self._camera is None:
                 raise CaptureError("DXcam could not create a camera for this output")
