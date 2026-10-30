@@ -10,6 +10,7 @@
 #include <unknwn.h>
 #include <inspectable.h>
 #include <windows.h>
+#include <cguid.h>
 #include <winrt/base.h>
 
 #include <cstdint>
