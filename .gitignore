@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.pyd
+*.egg-info/
+.pytest_cache/
+bench-results/
+test-output/
+*.recording.mp4

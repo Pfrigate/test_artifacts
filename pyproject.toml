@@ -1,0 +1,44 @@
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "screenrecorder"
+version = "1.0.0"
+description = "Windows 11 screen recorder producing PowerPoint-compatible H.264 MP4 without FFmpeg"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.12"
+classifiers = [
+  "Operating System :: Microsoft :: Windows :: Windows 11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Video :: Capture",
+]
+dependencies = [
+  "PySide6-Essentials>=6.7",
+  "numpy>=1.26",
+  "dxcam>=0.0.5; sys_platform == 'win32'",
+  "winrt-runtime>=2.2; sys_platform == 'win32'",
+  "winrt-Windows.Foundation>=2.2; sys_platform == 'win32'",
+  "winrt-Windows.Foundation.Metadata>=2.2; sys_platform == 'win32'",
+  "winrt-Windows.Graphics.Capture>=2.2; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "psutil>=5.9", "pyinstaller>=6.6", "pybind11>=2.12", "cmake>=3.26"]
+
+[project.gui-scripts]
+screenrecorder = "screenrecorder.app:main"
+
+[tool.scikit-build]
+wheel.packages = ["screenrecorder"]
+cmake.build-type = "Release"
+minimum-version = "0.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+  "windows: requires Windows with the native extension",
+  "capture: requires an interactive desktop for screen capture",
+]

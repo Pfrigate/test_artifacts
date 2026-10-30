@@ -1,0 +1,94 @@
+name: build-and-test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit-linux:
+    name: Unit tests (Linux, pure Python + offscreen UI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Qt runtime libraries
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - run: pip install pytest PySide6-Essentials numpy
+      - run: python -m pytest tests/unit -v
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  windows:
+    name: Windows build, tests, benchmark and executable
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      SR_REQUIRE_NATIVE: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Ensure Media Foundation is present
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "$env:WINDIR\System32\mfplat.dll")) {
+            Write-Host "mfplat.dll missing, installing Server-Media-Foundation"
+            Install-WindowsFeature Server-Media-Foundation
+          }
+          Get-Item "$env:WINDIR\System32\mfplat.dll", "$env:WINDIR\System32\mfreadwrite.dll", "$env:WINDIR\System32\msmpeg2vdec.dll" | Format-Table Name, Length
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+
+      - name: Build native extension (C++ / pybind11)
+        shell: pwsh
+        run: ./build_native.ps1
+
+      - name: Detect encoders and capture capabilities
+        run: python -m screenrecorder --list-encoders --out encoders.json
+
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -v -rs --junitxml=test-results.xml
+
+      - name: Benchmark
+        run: python bench/benchmark.py --duration 3 --backends synthetic,wgc,dxcam --out bench-results
+
+      - name: Build executable
+        shell: pwsh
+        run: ./build_exe.ps1 -SkipNative
+
+      - name: Executable self-test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force selftest-exe | Out-Null
+          $p = Start-Process -FilePath dist/ScreenRecorder/ScreenRecorder.exe `
+                -ArgumentList '--selftest', '--selftest-dir', 'selftest-exe', '--out', 'selftest-exe/report.json', '--resolution', '1080p', '--fps', '30' `
+                -Wait -PassThru
+          if (Test-Path selftest-exe/report.json) { Get-Content selftest-exe/report.json }
+          if ($p.ExitCode -ne 0) { throw "Self-test failed with exit code $($p.ExitCode)" }
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenRecorder-win64
+          path: dist/ScreenRecorder.zip
+
+      - name: Upload test videos, benchmark and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            test-results.xml
+            encoders.json
+            bench-results/
+            test-output/
+            selftest-exe/
