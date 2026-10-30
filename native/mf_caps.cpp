@@ -328,11 +328,40 @@ std::tuple<std::string, UINT, UINT> decode_with_mft(const std::wstring& path) {
   HRESULT last_input = S_OK;
   HRESULT last_output = S_OK;
   int fed = 0;
+  UINT32 seq_header_bytes = 0;
+  input_type->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &seq_header_bytes);
+  std::string nal_types;  // NAL unit types of the first compressed sample, for diagnostics
+  auto describe_nals = [&](IMFSample* s) {
+    com_ptr<IMFMediaBuffer> b;
+    if (FAILED(s->ConvertToContiguousBuffer(b.put()))) return;
+    BYTE* p = nullptr;
+    DWORD n = 0;
+    if (FAILED(b->Lock(&p, nullptr, &n))) return;
+    const bool annexb = n > 4 && p[0] == 0 && p[1] == 0 && (p[2] == 1 || (p[2] == 0 && p[3] == 1));
+    nal_types = annexb ? "annexb:" : "lenpfx:";
+    if (annexb) {
+      for (DWORD i = 0; i + 3 < n; ++i) {
+        if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1) {
+          nal_types += std::to_string(p[i + 3] & 0x1F) + ",";
+          i += 2;
+        }
+      }
+    } else {
+      for (DWORD i = 0; i + 4 < n;) {
+        const DWORD len = (DWORD(p[i]) << 24) | (DWORD(p[i + 1]) << 16) | (DWORD(p[i + 2]) << 8) | p[i + 3];
+        nal_types += std::to_string(p[i + 4] & 0x1F) + ",";
+        if (len == 0) break;
+        i += 4 + len;
+      }
+    }
+    b->Unlock();
+  };
   for (int i = 0; i < 600; ++i) {
     DWORD flags = 0;
     com_ptr<IMFSample> compressed;
     check(reader->ReadSample(video, 0, nullptr, &flags, nullptr, compressed.put()), "ReadSample(compressed)");
     if (compressed) {
+      if (fed == 0) describe_nals(compressed.get());
       last_input = decoder->ProcessInput(0, compressed.get(), 0);
       ++fed;
       com_ptr<IMFSample> decoded;
@@ -342,15 +371,18 @@ std::tuple<std::string, UINT, UINT> decode_with_mft(const std::wstring& path) {
     }
     if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) break;
   }
+  decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
   decoder->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
   com_ptr<IMFSample> decoded;
   last_output = try_output(decoded);
   if (decoded) return nv12_sample_to_bgra(decoded.get(), output_type.get());
 
-  char detail[192];
+  char detail[320];
   std::snprintf(detail, sizeof(detail),
-                "H.264 decoder produced no frame (fed=%d, ProcessInput=0x%08lX, ProcessOutput=0x%08lX)", fed,
-                static_cast<unsigned long>(last_input), static_cast<unsigned long>(last_output));
+                "H.264 decoder produced no frame (fed=%d, ProcessInput=0x%08lX, ProcessOutput=0x%08lX, "
+                "seq_header=%u bytes, first sample NALs=%s)",
+                fed, static_cast<unsigned long>(last_input), static_cast<unsigned long>(last_output),
+                seq_header_bytes, nal_types.c_str());
   throw HrError(FAILED(last_input) ? last_input : (FAILED(last_output) ? last_output : MF_E_END_OF_STREAM), detail);
 }
 
