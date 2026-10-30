@@ -111,6 +111,23 @@ std::vector<EncoderInfo> enumerate_h264_encoders(bool test_modes) {
   return result;
 }
 
+std::vector<std::wstring> enumerate_h264_decoders() {
+  ensure_mf();
+  MFT_REGISTER_TYPE_INFO input{MFMediaType_Video, MFVideoFormat_H264};
+  IMFActivate** activates = nullptr;
+  UINT32 count = 0;
+  const UINT32 flags = MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
+                       MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER;
+  check(MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, flags, &input, nullptr, &activates, &count), "MFTEnumEx(decoder)");
+  std::vector<std::wstring> names;
+  for (UINT32 i = 0; i < count; ++i) {
+    names.push_back(get_string(activates[i], MFT_FRIENDLY_NAME_Attribute));
+    activates[i]->Release();
+  }
+  CoTaskMemFree(activates);
+  return names;
+}
+
 ProbeResult probe_file(const std::wstring& path, bool count_frames) {
   ensure_mf();
   com_ptr<IMFSourceReader> reader;

@@ -59,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
         _emit(
             {
                 "encoders": caps.encoders,
+                "decoders": list(native.enumerate_decoders()) if native else [],
                 "error": caps.error,
                 "wgc_supported": CaptureManager.wgc_available(),
                 "wgc_capabilities": CaptureManager.wgc_capabilities(),

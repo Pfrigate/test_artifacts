@@ -47,6 +47,9 @@ struct ProbeResult {
   bool has_audio = false;
 };
 
+// Friendly names of the H.264 decoder MFTs registered on this machine.
+std::vector<std::wstring> enumerate_h264_decoders();
+
 ProbeResult probe_file(const std::wstring& path, bool count_frames);
 
 // Decodes one frame near `position_hns` to top-down BGRA (alpha forced to 255).

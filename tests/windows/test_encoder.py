@@ -121,7 +121,14 @@ def test_thumbnail(device, output_dir):
     for _ in range(30):
         enc.write_synthetic()
     path = enc.finalize()
-    data, w, h = native.thumbnail(str(path), 0.5)
+    decoders = native.enumerate_decoders()
+    print("H.264 decoders:", decoders)
+    try:
+        data, w, h = native.thumbnail(str(path), 0.5)
+    except native.NativeError as exc:
+        if not decoders:
+            pytest.skip(f"no H.264 decoder MFT on this system: {exc}")
+        raise
     assert (w, h) == (1280, 720) and len(data) == w * h * 4
     pixels = np.frombuffer(data, dtype=np.uint8).reshape(h, w, 4)
     assert pixels[..., :3].std() > 1.0  # not a blank frame

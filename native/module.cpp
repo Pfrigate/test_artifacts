@@ -128,6 +128,15 @@ PYBIND11_MODULE(_srnative, m) {
       py::arg("test_modes") = true, "H.264 encoder MFTs available on this machine");
 
   m.def(
+      "enumerate_decoders",
+      [] {
+        py::list names;
+        for (const auto& n : enumerate_h264_decoders()) names.append(utf8(n));
+        return names;
+      },
+      "Friendly names of the registered H.264 decoder MFTs");
+
+  m.def(
       "probe",
       [](const std::wstring& path, bool count_frames) {
         ProbeResult r;
