@@ -31,6 +31,12 @@ def verify_mp4(path: Path, width: int, height: int, fps: int, frames: int | None
         problems.append("duplicate timestamps")
     if frames is not None and probe["frame_count"] != frames:
         problems.append(f"frame_count {probe['frame_count']} != {frames}")
+    try:
+        _pixels, dec_w, dec_h = native.thumbnail(str(path), 0.0)
+        if (dec_w, dec_h) != (width, height):
+            problems.append(f"decoded size {dec_w}x{dec_h} != {width}x{height}")
+    except Exception as exc:  # noqa: BLE001 - an undecodable file is the worst failure
+        problems.append(f"not decodable by Media Foundation: {exc}")
     warnings = []
     if not info.moov_before_mdat:
         # Local playback in PowerPoint does not need "fast start"; reported, not fatal.

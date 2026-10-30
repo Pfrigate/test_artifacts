@@ -337,8 +337,11 @@ std::tuple<std::string, UINT, UINT> decode_with_mft(const std::wstring& path) {
     BYTE* p = nullptr;
     DWORD n = 0;
     if (FAILED(b->Lock(&p, nullptr, &n))) return;
+    char hex[64] = {};
+    for (DWORD i = 0; i < std::min<DWORD>(n, 12); ++i) std::snprintf(hex + i * 3, 4, "%02X ", p[i]);
+    nal_types = std::string("bytes=") + hex + " ";
     const bool annexb = n > 4 && p[0] == 0 && p[1] == 0 && (p[2] == 1 || (p[2] == 0 && p[3] == 1));
-    nal_types = annexb ? "annexb:" : "lenpfx:";
+    nal_types += annexb ? "annexb:" : "lenpfx:";
     if (annexb) {
       for (DWORD i = 0; i + 3 < n; ++i) {
         if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1) {

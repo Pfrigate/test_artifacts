@@ -202,13 +202,13 @@ void VideoEncoder::open_writer(bool hardware, UINT profile) {
   check(attrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, hardware ? TRUE : FALSE), "SetUINT32");
   check(attrs->SetUnknown(MF_SINK_WRITER_D3D_MANAGER, device_manager_.get()), "SetUnknown(D3D manager)");
   check(attrs->SetGUID(MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_MPEG4), "SetGUID(container)");
-  // moov before mdat ("fast start"): PowerPoint and progressive players can start immediately.
-  check(attrs->SetUINT32(MF_MPEG4SINK_MOOV_BEFORE_MDAT, TRUE), "SetUINT32(moov first)");
+  // MF_MPEG4SINK_MOOV_BEFORE_MDAT is deliberately not set: relocating moov at Finalize
+  // produced files whose sample offsets pointed at the wrong bytes (undecodable). PowerPoint
+  // plays local MP4 files with moov at the end without issue.
   check(attrs->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, FALSE), "SetUINT32(throttling)");
 
-  // Open the file ourselves with read/write access: relocating moov in front of mdat at
-  // Finalize re-reads the file, which fails (E_ACCESSDENIED) on the write-only stream the
-  // sink writer would create from a URL.
+  // Open the file ourselves (read/write) so the handle is released deterministically in
+  // finalize() before Python renames the file.
   com_ptr<IMFByteStream> stream_file;
   check(MFCreateFile(MF_ACCESSMODE_READWRITE, MF_OPENMODE_DELETE_IF_EXIST, MF_FILEFLAGS_NONE, config_.path.c_str(),
                      stream_file.put()),
