@@ -106,6 +106,7 @@ class VideoEncoder {
   std::unique_ptr<SurfacePool> pool_;
   com_ptr<IMFDXGIDeviceManager> device_manager_;
   UINT reset_token_ = 0;
+  com_ptr<IMFByteStream> byte_stream_;
   com_ptr<IMFSinkWriter> writer_;
   DWORD stream_index_ = 0;
   bool hardware_ = false;

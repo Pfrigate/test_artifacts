@@ -39,6 +39,23 @@ class CaptureError(RuntimeError):
     pass
 
 
+def _match_comtypes_apartment() -> None:
+    """comtypes (used by DXcam) calls CoInitializeEx on import with STA by default, which
+    fails with RPC_E_CHANGED_MODE on a thread already in the MTA (e.g. after the native
+    module initialised COM). ``sys.coinit_flags`` tells comtypes which apartment to join."""
+    import sys
+
+    if "comtypes" in sys.modules or not win32.IS_WINDOWS:
+        return
+    import ctypes
+
+    apt_type = ctypes.c_int(-1)
+    qualifier = ctypes.c_int(0)
+    if ctypes.windll.ole32.CoGetApartmentType(ctypes.byref(apt_type), ctypes.byref(qualifier)) == 0:
+        if apt_type.value == 1:  # APTTYPE_MTA
+            sys.coinit_flags = 0  # COINIT_MULTITHREADED
+
+
 # ---------------------------------------------------------------------------------------
 # Sessions
 
@@ -100,6 +117,7 @@ class DxcamSession:
         region: tuple[int, int, int, int] | None,
         max_frames: int = 0,
     ) -> None:
+        _match_comtypes_apartment()
         import dxcam  # imported lazily: it initialises DXGI on import
 
         self._dxcam = dxcam

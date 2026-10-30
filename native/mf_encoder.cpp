@@ -179,6 +179,10 @@ VideoEncoder::VideoEncoder(std::shared_ptr<D3DDevice> device, EncoderConfig conf
         last_error = HrError(e.code(), "Sink writer setup failed: " + utf8(std::wstring(e.message())));
       }
       writer_ = nullptr;
+      if (byte_stream_) {
+        byte_stream_->Close();
+        byte_stream_ = nullptr;
+      }
       DeleteFileW(config_.path.c_str());
     }
   }
@@ -202,9 +206,20 @@ void VideoEncoder::open_writer(bool hardware, UINT profile) {
   check(attrs->SetUINT32(MF_MPEG4SINK_MOOV_BEFORE_MDAT, TRUE), "SetUINT32(moov first)");
   check(attrs->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, FALSE), "SetUINT32(throttling)");
 
+  // Open the file ourselves with read/write access: relocating moov in front of mdat at
+  // Finalize re-reads the file, which fails (E_ACCESSDENIED) on the write-only stream the
+  // sink writer would create from a URL.
+  com_ptr<IMFByteStream> stream_file;
+  check(MFCreateFile(MF_ACCESSMODE_READWRITE, MF_OPENMODE_DELETE_IF_EXIST, MF_FILEFLAGS_NONE, config_.path.c_str(),
+                     stream_file.put()),
+        "MFCreateFile");
   com_ptr<IMFSinkWriter> writer;
-  check(MFCreateSinkWriterFromURL(config_.path.c_str(), nullptr, attrs.get(), writer.put()),
-        "MFCreateSinkWriterFromURL");
+  HRESULT create_hr = MFCreateSinkWriterFromURL(nullptr, stream_file.get(), attrs.get(), writer.put());
+  if (FAILED(create_hr)) {
+    stream_file->Close();
+    throw_hr(create_hr, "MFCreateSinkWriterFromURL");
+  }
+  byte_stream_ = stream_file;
 
   const UINT w = config_.width;
   const UINT h = config_.height;
@@ -407,6 +422,10 @@ void VideoEncoder::finalize() {
   if (writer_) {
     hr = writer_->Finalize();
     writer_ = nullptr;
+  }
+  if (byte_stream_) {
+    byte_stream_->Close();  // release the file handle so Python can rename/delete it
+    byte_stream_ = nullptr;
   }
   if (pool_) pool_->wait_all_returned(std::chrono::milliseconds(5000));
   // With zero samples Finalize fails by design (MF_E_SINK_NO_SAMPLES_PROCESSED); the
