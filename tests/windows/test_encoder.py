@@ -38,7 +38,7 @@ def test_synthetic_modes(device, output_dir, width, height, fps):
     path = enc.finalize()
     assert path is not None and path.exists() and not enc.part_path.exists()
     report = verify_mp4(path, width, height, fps, frames)
-    print(info, report["probe"])
+    print(info, report["probe"], report["top_level_boxes"], report["warnings"])
     assert report["ok"], report["problems"]
     assert report["probe"]["duration"] == pytest.approx(1.0, abs=1.5 / fps)
     assert report["probe"]["keyframe_count"] >= 1
@@ -88,8 +88,11 @@ def test_explicit_indices_keep_wall_clock_timeline(device, output_dir):
         enc.write_bgra(frame, index)
     with pytest.raises(native.NativeError):
         enc.write_bgra(frame, 11)  # non-monotonic timestamps are rejected
-    report = verify_mp4(enc.finalize(), 1280, 720, 30, 5)
+    report = verify_mp4(enc.finalize(), 1280, 720, 30)
     assert report["ok"], report["problems"]
+    # Either the 5 samples are kept with their timestamps, or the encoder fills the gap by
+    # repeating frames (Microsoft's software MFT does); the timeline must reach index 11.
+    assert report["probe"]["frame_count"] in (5, 12)
     assert report["probe"]["last_pts"] == pytest.approx(11 / 30, abs=1e-3)
 
 

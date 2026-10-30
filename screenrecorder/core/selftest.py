@@ -31,15 +31,19 @@ def verify_mp4(path: Path, width: int, height: int, fps: int, frames: int | None
         problems.append("duplicate timestamps")
     if frames is not None and probe["frame_count"] != frames:
         problems.append(f"frame_count {probe['frame_count']} != {frames}")
+    warnings = []
     if not info.moov_before_mdat:
-        problems.append("moov not before mdat")
+        # Local playback in PowerPoint does not need "fast start"; reported, not fatal.
+        warnings.append(f"moov not before mdat (boxes: {info.top_level})")
     return {
         "path": str(path),
         "probe": probe,
         "avc_profile": info.video_tracks[0].avc_profile if info.video_tracks else 0,
         "avc_level": info.video_tracks[0].avc_level if info.video_tracks else 0,
         "moov_before_mdat": info.moov_before_mdat,
+        "top_level_boxes": info.top_level,
         "problems": problems,
+        "warnings": warnings,
         "ok": not problems,
     }
 

@@ -10,6 +10,7 @@
 #include <mftransform.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace sr {
@@ -203,12 +204,23 @@ std::tuple<std::string, UINT, UINT> decode_thumbnail(const std::wstring& path, i
   }
 
   com_ptr<IMFSample> sample;
-  for (int attempt = 0; attempt < 120 && !sample; ++attempt) {
-    DWORD flags = 0;
+  DWORD flags = 0;
+  int reads = 0;
+  for (; reads < 240 && !sample; ++reads) {
+    flags = 0;
     check(reader->ReadSample(video, 0, nullptr, &flags, nullptr, sample.put()), "IMFSourceReader::ReadSample");
-    if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) break;
+    if ((flags & (MF_SOURCE_READERF_ENDOFSTREAM | MF_SOURCE_READERF_ERROR)) != 0) break;
   }
-  if (!sample) throw HrError(MF_E_END_OF_STREAM, "No decodable video frame found");
+  if (!sample && position_hns > 0) {
+    // Seeking can land past the last decodable frame of very short clips: retry from 0.
+    return decode_thumbnail(path, 0);
+  }
+  if (!sample) {
+    char detail[96];
+    std::snprintf(detail, sizeof(detail), "No decodable video frame found (reads=%d, flags=0x%lX)", reads,
+                  static_cast<unsigned long>(flags));
+    throw HrError(MF_E_END_OF_STREAM, detail);
+  }
 
   com_ptr<IMFMediaBuffer> buffer;
   check(sample->GetBufferByIndex(0, buffer.put()), "GetBufferByIndex");

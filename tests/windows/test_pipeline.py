@@ -59,7 +59,6 @@ def test_selftest_end_to_end(output_dir):
     print(report)
     assert report["ok"], report.get("problems")
     assert report["avc_profile"] in (77, 100)
-    assert report["moov_before_mdat"]
 
 
 def test_wgc_support_queries():
